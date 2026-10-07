@@ -26,7 +26,7 @@ MODEL_BITMAPS = {
     "FS": "110",
     "CMOD EGSE": "111",
 }
-DEFAULT_COM_PORT = 10
+DEFAULT_COM_PORT = 5
 DEFAULT_CMD_SPEED = "Fast"  # "Steady" or "Fast"
 EXP_MODEL_ID = 7
 
@@ -34,7 +34,7 @@ EXP_MODEL_ID = 7
 SHOW_MMS_TEST_TOOLS = False
 
 # PSU Config
-PSU_COM_PORT = 8
+PSU_COM_PORT = 10
 PSU_LOGGING_FREQ = 10  # in HZ
 
 # TEC current configuration used by FFT and power-state verification.
@@ -85,7 +85,7 @@ POST_EXPECTED_CRC = {  # CRCs for combined patch v3.2.8 and v3.6.2
     "ASW_IMAGE_4_CRC": 0xE39A,
     "ASW_IMAGE_5_CRC": 0x440F,
     "BSW_IMAGE_CRC": 0xD2D7,
-    "MEASUREMENT_TABLE_CRC": 0xE3FC, # msrmt table v1.1.2_E3FC
+    "MEASUREMENT_TABLE_CRC": 0x7952, # msrmt table v1.1.3_7952
 }
 
 
