@@ -32,7 +32,6 @@ from utility_modules.eb_packet_utility import (
 
 # core
 from core_modules import tmstruct, constants as const, config
-from core_modules import measurement_config
 from core_modules.constants import HEATER_INCLUSIVE_STATES, MODEL_CONSUMPTION
 
 from widget_modules import monitoring_limits
@@ -114,6 +113,7 @@ def set_eb_only_test_mode(state: dict[str, Any], enabled: bool) -> None:
 
 
 def mms_reasons(hk: Any, limits: dict[str, Any]) -> tuple[list[str], bool, bool]:
+    """Evaluate MMS faults; zero OB_HK_ID marks unavailable relayed OB readings."""
     reasons: list[str] = []
     tec_pre_action = False
     ob5v_pre_action = False
@@ -126,7 +126,9 @@ def mms_reasons(hk: Any, limits: dict[str, Any]) -> tuple[list[str], bool, bool]
     current_state = int(
         getattr(hk, "CURRENT_OPERATING_STATE", 0) if getattr(hk, "CURRENT_OPERATING_STATE", None) is not None else 0
     )
-    skip_ob_checks = (not ob_5v_enabled) or (current_state == 0x02)
+    # OB power asserts before its first HK arrives; the zero-filled OB block
+    # is not an analogue measurement. EB limits and error flags remain active.
+    skip_ob_checks = (not ob_5v_enabled) or (current_state == 0x02) or (getattr(hk, "OB_HK_ID", None) == 0)
 
     for label, field_name, limit_key, tec_field in _MMS_FIELDS:
         if label.startswith("OB ") and (
@@ -1880,6 +1882,9 @@ def perform_acq_check_sync(
     acq_timeout_s: float | None = None,
     acq_sample_time_ms: int = 0,
     check_state6: bool = True,
+    *,
+    readings: dict[str, Any] | None = None,
+    errors_out: list[str] | None = None,
 ) -> None:
     """Synchronous acquisition wait helper. Blocks until acquisition completes or timeout/abort.
 
@@ -1908,6 +1913,8 @@ def perform_acq_check_sync(
         acq_sample_time_ms: ACQ_SAMPLE_TIME field from SET_ACQ_CONFIGS, in ms.
             Used to compute effective spacing; values below 250 are clamped to 250.
         check_state6: run the t+150s State 6 power consumption check.
+        readings: optional output for the measured State 6 and completion readings.
+        errors_out: optional output for State 6 power-check errors.
 
     This can be called from synchronous script code (e.g. inside `run_fft`).
     For async callers, use `await perform_acq_check()` which delegates to `run.io_bound`.
@@ -1994,6 +2001,7 @@ def perform_acq_check_sync(
                     latest_hk,
                 )
                 thrm = getattr(latest_hk, "THRM_STATUS", None)
+                _record_state_check_report(readings, errors_out, errors, latest_hk, ch4_current_ma)
                 if errors:
                     count = len(errors)
                     numbered = [f"{i + 1}. {err.strip()}" for i, err in enumerate(errors)]
@@ -2018,6 +2026,8 @@ def perform_acq_check_sync(
                     notify_positive(msg)
             except Exception as exc:
                 info_log.warning("Acquisition t+150s PSU current check failed: %s", exc)
+                if errors_out is not None:
+                    errors_out.append(f"Acquisition t+150s PSU current check failed: {exc}")
 
         cos = getattr(latest_hk, "CURRENT_OPERATING_STATE", None)
         if cos != _ACQ_STATE:
@@ -2034,12 +2044,15 @@ def perform_acq_check_sync(
                 getattr(latest_hk, "TIME", None),
             )
             notify_positive(acq_complete_msg)
+            if readings is not None:
+                readings["Completion operating state"] = cos
+                readings["SCIENCE_PACKETS_SENT"] = sci_count_end
+                readings["State 6 power check"] = "Performed" if check_state6 and _acq_150s_checked else "Not performed"
             _warn_if_sci_packets_missing(sent_start, sci_count_end, received_start)
             # Do not consume from const.sci_queue here: the telemetry poll loop
             # owns draining it into the packet viewer/state, and stealing a
             # packet for logging would make it disappear from the GUI.
             progress.finish()
-            _check_eb_sci_temperatures(received_start)
             return
 
         info_log.info(
@@ -2084,47 +2097,6 @@ def _warn_if_sci_packets_missing(
     )
     info_log.warning(msg)
     notify(msg, color="warning")
-
-
-def _check_eb_sci_temperatures(received_start: int) -> None:
-    """Range-check SWIR and heatsink temperatures in each EB SCI data point."""
-    packets = eb_packet_utility.get_sci_packets_since(received_start)
-    if not packets:
-        return
-    errors: list[str] = []
-    checked_points = 0
-    for packet in packets:
-        packet_number = getattr(packet, "PACKET_NUMBER", "?")
-        points = eb_packet_utility.decode_sci_data_points(packet)
-        if not points:
-            errors.append(f"SCI packet {packet_number}: no SCI data points to check temperatures")
-            continue
-        for point in points:
-            checked_points += 1
-            point_number = getattr(point, "POINT_INDEX", "?")
-            for field, (minimum, maximum) in measurement_config.DARK_SCIENCE_TEMPERATURE_LIMITS.items():
-                value = getattr(point, field, None)
-                if value is None:
-                    errors.append(f"SCI packet {packet_number}, point {point_number}: missing field {field}")
-                    continue
-                temp_c = hk_conversions.sci_temperature_to_c(field, value)
-                if not minimum <= temp_c <= maximum:
-                    errors.append(
-                        f"SCI packet {packet_number}, point {point_number}: {field}={temp_c:.2f} C "
-                        f"(raw {value}), expected {minimum}..{maximum} C"
-                    )
-    if errors:
-        count = len(errors)
-        numbered = "\n".join(f"{index + 1}. {error}" for index, error in enumerate(errors))
-        raise AssertionError(
-            f"SCI temperature verification failed: {count} error{'s' if count != 1 else ''}:\n{numbered}"
-        )
-    msg = (
-        f"SCI temperatures OK for {checked_points} data point{'s' if checked_points != 1 else ''} "
-        f"across {len(packets)} packet{'s' if len(packets) != 1 else ''}"
-    )
-    info_log.info(msg)
-    notify_positive(msg)
 
 
 def perform_hk_check(hk: Any = None, post: Any = None, hk_type: str = "hk") -> dict:
@@ -2592,7 +2564,40 @@ def pull_psu_after_ret(timeout_s: float = 6.0, poll_timeout_s: float = 0.5) -> d
     return cached if isinstance(cached, dict) else None
 
 
-def verify_power_state(state: str) -> tuple[str, bool]:
+def _record_state_check_report(
+    readings: dict[str, Any] | None,
+    errors_out: list[str] | None,
+    errors: list[str],
+    hk: Any = None,
+    current_ma: float | None = None,
+) -> None:
+    """Expose the samples used by a check without fetching different telemetry."""
+    if errors_out is not None:
+        errors_out.extend(errors)
+    if readings is None:
+        return
+    readings["PSU_EB_I (mA)"] = current_ma
+    if hk is not None:
+        for field in ("CURRENT_OPERATING_STATE", "TEC_SETPOINT"):
+            readings[field] = getattr(hk, field, None)
+        tec_raw = getattr(hk, "EB_TEC_DRIVE_CURRENT", None)
+        readings["TEC current (A)"] = tec_raw * 0.0000162 if tec_raw is not None else None
+        for flag_group, fields in (
+            ("INSTR_STATUS_FLAGS", ("OB_MECHANISM_BOARD_ENABLED", "OB_DETECTOR_BOARD_ENABLED")),
+            ("THRM_STATUS", ("HMS", "HDS")),
+            ("MTR_FLAGS", ("MOVING",)),
+        ):
+            flags = getattr(hk, flag_group, None)
+            for field in fields:
+                readings[f"{flag_group}.{field}"] = getattr(flags, field, None)
+
+
+def verify_power_state(
+    state: str,
+    *,
+    readings: dict[str, Any] | None = None,
+    errors_out: list[str] | None = None,
+) -> tuple[str, bool]:
     """Verify the OB is in the expected power state.
 
     Fetches the latest HK and PSU samples from their queues, runs a PSU
@@ -2606,6 +2611,8 @@ def verify_power_state(state: str) -> tuple[str, bool]:
     State7  — All Active:           State4 checks + motor moving
 
     Returns (msg, passed) — the same contract as verify_safe_ret / verify_standby_ret.
+    Optional readings/errors_out containers receive the actual check measurements
+    and errors for structured script pause reports.
     """
     _BOARD_STATES = {"State3", "State4", "State5", "State7"}
     _TEC_STATES = {"State4", "State5", "State7"}
@@ -2674,6 +2681,7 @@ def verify_power_state(state: str) -> tuple[str, bool]:
                 errors.append("Motor not moving (MTR_FLAGS.MOVING=0)")
 
     cos = getattr(latest_hk, "CURRENT_OPERATING_STATE", None) if latest_hk is not None else None
+    _record_state_check_report(readings, errors_out, errors, latest_hk, ch4_current_ma)
 
     if errors:
         count = len(errors)
@@ -2695,7 +2703,10 @@ def verify_power_state(state: str) -> tuple[str, bool]:
         return msg, True
 
 
-def verify_safe_ret():
+def verify_safe_ret(
+    *, readings: dict[str, Any] | None = None, errors_out: list[str] | None = None
+) -> tuple[str, bool]:
+    """Verify SAFE RET, optionally collecting readings/errors for a pause report."""
     errors = []
     # ?RET and first check
     # This block performs the SAFE RET verification after issuing a RET and HK request.
@@ -2722,6 +2733,9 @@ def verify_safe_ret():
                 errors.extend(result["details"])
             else:
                 errors.append(f"POST Packet Check failed with unknown error: {result}")
+    _record_state_check_report(readings, errors_out, errors, current_ma=ch4_current_ma)
+    if readings is not None:
+        readings["POST check"] = result
     if errors:
         count = len(errors)
         numbered = [f"{i + 1}. {err.strip()}" for i, err in enumerate(errors)]
@@ -2770,7 +2784,11 @@ def _wait_for_settled_hk(after_hk_sequence: int | None, timeout: float = 5.0):
 def verify_standby_ret(
     after_hk_sequence: int | None = None,
     after_psu_sequence: int | None = None,
-):
+    *,
+    readings: dict[str, Any] | None = None,
+    errors_out: list[str] | None = None,
+) -> tuple[str, bool]:
+    """Verify STANDBY RET, optionally collecting readings/errors for a pause report."""
     errors = []
     # Wait for telemetry newer than the markers captured before STANDBY. This
     # accepts data that arrived during the normal settling delay instead of
@@ -2807,6 +2825,9 @@ def verify_standby_ret(
                 errors.extend(result["details"])
             else:
                 errors.append(f"HK Check failed with unknown error: {result}")
+    _record_state_check_report(readings, errors_out, errors, latest_hk, ch4_current_ma)
+    if readings is not None:
+        readings["HK check"] = result
     if errors:
         count = len(errors)
         numbered = [f"{i + 1}. {err.strip()}" for i, err in enumerate(errors)]

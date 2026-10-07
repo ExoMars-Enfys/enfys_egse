@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from widget_modules import menu_widget, ui_runtime_controller as urc
+from widget_modules import monitoring_limits
 
 
 class _DummyLogger:
@@ -58,6 +59,69 @@ def test_mms_reasons_masks_ob_general_error(monkeypatch) -> None:
     assert reasons == []
     assert tec_pre_action is False
     assert ob5v_pre_action is False
+
+
+@pytest.mark.parametrize("ob_hk_id", [0, 1])
+def test_mms_standby_checks_ob_limits_only_after_ob_hk_arrives(monkeypatch, ob_hk_id) -> None:
+    hk = SimpleNamespace(
+        INSTRUMENT_STATUS_FLAGS=1 << 10,
+        CURRENT_OPERATING_STATE=0x04,
+        OB_HK_ID=ob_hk_id,
+        POST_ERROR_FLAGS=0,
+        ERROR_FLAGS=0,
+    )
+    monkeypatch.setattr(urc.const, "MMS_MASK_OB_LIMIT_CHECKS", False)
+    monkeypatch.setattr(urc.const, "MMS_EB_ONLY_TEST_MODE", False)
+    monkeypatch.setattr(
+        urc, "decoded",
+        lambda _packet, field: (-255.7248 if field.endswith("_TRP") else 0.0)
+        if field.startswith("OB_") else None,
+    )
+
+    reasons, tec, ob5v = urc.mms_reasons(hk, monitoring_limits.mms_alarm_limits())
+
+    assert len(reasons) == (6 if ob_hk_id else 0)
+    assert all(reason.startswith("OB ") for reason in reasons)
+    assert tec is False
+    assert ob5v is bool(ob_hk_id)
+
+
+@pytest.mark.parametrize(
+    "fault, expected",
+    [
+        ("eb_limit", "EB +12V out of limits"),
+        ("post_error", "POST Error Flags asserted"),
+        ("ob_unresponsive", "HK Error Flags asserted: OB_UNRESPONSIVE"),
+        ("ob_error", "OB_LAST_ERROR=0x10"),
+        ("motor_error", "OB_MOTOR_ERROR=0x04"),
+    ],
+)
+def test_mms_faults_remain_active_before_first_ob_hk(monkeypatch, fault, expected) -> None:
+    hk = SimpleNamespace(
+        INSTRUMENT_STATUS_FLAGS=1 << 10,
+        CURRENT_OPERATING_STATE=0x04,
+        OB_HK_ID=0,
+        POST_ERROR_FLAGS=int(fault == "post_error"),
+        ERROR_FLAGS=int(fault == "ob_unresponsive"),
+        ERROR_FLAGS_BITS=SimpleNamespace(OB_UNRESPONSIVE=int(fault == "ob_unresponsive")),
+        OB_LAST_ERROR=0x10 if fault == "ob_error" else 0,
+        OB_MOTOR_ERROR=0x04 if fault == "motor_error" else 0,
+    )
+    monkeypatch.setattr(urc.const, "MMS_MASK_OB_LIMIT_CHECKS", False)
+    monkeypatch.setattr(urc.const, "MMS_MASK_OB_UNRESPONSIVE", False)
+    monkeypatch.setattr(urc.const, "MMS_EB_ONLY_TEST_MODE", False)
+    monkeypatch.setattr(
+        urc, "decoded",
+        lambda _packet, field: 0.0 if field.startswith("OB_") else (
+            0.0 if fault == "eb_limit" and field == "EB_MEAS_MAIN_12V" else None
+        ),
+    )
+
+    reasons, _, ob5v = urc.mms_reasons(hk, monitoring_limits.mms_alarm_limits())
+
+    assert len(reasons) == 1
+    assert reasons[0].startswith(expected)
+    assert ob5v is False
 
 
 def test_mms_reasons_adds_ob_error_details_even_without_active_bits(monkeypatch) -> None:

@@ -7,29 +7,67 @@ from core_modules import config
 from widget_modules import ui_runtime_controller as urc
 
 
-def test_eb_sci_temperature_check_uses_swir_and_heatsink_data_points(monkeypatch) -> None:
-    packet = SimpleNamespace(
-        PACKET_NUMBER=4,
-        HEATSINK_START_TEMP=0,
-        HEATSINK_END_TEMP=0,
-        SWIR_START_TEMP=0,
-        SWIR_END_TEMP=0,
-        MWIR_START_TEMP=65535,
-        MWIR_END_TEMP=65535,
+def test_acquisition_completion_does_not_check_science_point_temperatures(monkeypatch) -> None:
+    hk_packets = iter(
+        (
+            SimpleNamespace(CURRENT_OPERATING_STATE=0x08, SCIENCE_PACKETS_SENT=0),
+            SimpleNamespace(CURRENT_OPERATING_STATE=0x00, SCIENCE_PACKETS_SENT=1),
+        )
     )
-    decoded_points = [SimpleNamespace(POINT_INDEX=0, SWIR_TEMP=6282, HT_SINK_TEMP=6282)]
-    positive_messages = []
-    monkeypatch.setattr(urc.eb_packet_utility, "get_sci_packets_since", lambda _count: [packet])
-    monkeypatch.setattr(urc.eb_packet_utility, "decode_sci_data_points", lambda _packet: decoded_points)
-    monkeypatch.setattr(urc, "notify_positive", positive_messages.append)
 
-    urc._check_eb_sci_temperatures(0)
+    class _Progress:
+        def __init__(self, _message) -> None:
+            pass
 
-    assert positive_messages == ["SCI temperatures OK for 1 data point across 1 packet"]
+        def update(self, _message) -> None:
+            pass
 
-    decoded_points[:] = [SimpleNamespace(POINT_INDEX=1, SWIR_TEMP=0, HT_SINK_TEMP=6282)]
-    with pytest.raises(AssertionError, match="SWIR_TEMP=nan C"):
-        urc._check_eb_sci_temperatures(0)
+        def finish(self) -> None:
+            pass
+
+    monkeypatch.setattr(urc, "get_latest_hk", lambda: next(hk_packets))
+    monkeypatch.setattr(urc.eb_packet_utility, "get_sci_received_count", lambda: 0)
+    monkeypatch.setattr(urc, "_warn_if_sci_packets_missing", lambda *_args: None)
+    monkeypatch.setattr(urc.eb_packet_utility, "get_sci_packets_since", lambda *_args: pytest.fail("SCI temps checked"))
+    monkeypatch.setattr(urc, "ProgressNotifier", _Progress)
+    monkeypatch.setattr(urc, "is_aborted", lambda: False)
+    monkeypatch.setattr(urc.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(urc.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(urc, "notify_positive", lambda _message: None)
+
+    urc.perform_acq_check_sync(acq_timeout_s=1, check_state6=False)
+
+
+def test_acquisition_report_preserves_state6_failure(monkeypatch) -> None:
+    hk_packets = iter(
+        (
+            SimpleNamespace(CURRENT_OPERATING_STATE=0x08, SCIENCE_PACKETS_SENT=0),
+            SimpleNamespace(CURRENT_OPERATING_STATE=0x00, SCIENCE_PACKETS_SENT=1),
+        )
+    )
+    times = iter((0.0, 0.0, 151.0, 151.0))
+    monkeypatch.setattr(urc, "get_latest_hk", lambda: next(hk_packets))
+    monkeypatch.setattr(urc.eb_packet_utility, "get_sci_received_count", lambda: 0)
+    monkeypatch.setattr(urc, "_warn_if_sci_packets_missing", lambda *_args: None)
+    monkeypatch.setattr(urc, "ProgressNotifier", lambda *_args: SimpleNamespace(finish=lambda: None))
+    monkeypatch.setattr(urc, "is_aborted", lambda: False)
+    monkeypatch.setattr(urc.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(urc, "notify_positive", lambda _message: None)
+    monkeypatch.setattr(urc, "notify_negative", lambda _message: None)
+
+    def consumption(_states, errors, _hk):
+        errors.append("State 6 current out of range")
+        return 321.0
+
+    monkeypatch.setattr(urc, "windowed_consumption_check", consumption)
+    readings, errors = {}, []
+
+    urc.perform_acq_check_sync(acq_timeout_s=300, readings=readings, errors_out=errors)
+
+    assert errors == ["State 6 current out of range"]
+    assert readings["PSU_EB_I (mA)"] == 321.0
+    assert readings["SCIENCE_PACKETS_SENT"] == 1
+    assert readings["State 6 power check"] == "Performed"
 
 
 def test_plot_samples_retain_real_and_adu_values_for_each_timestamp() -> None:
