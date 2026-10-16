@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,6 +49,7 @@ def _patch_packet_decoders(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
         "critical": [],
         "noncritical": [],
         "latest_hk": [],
+        "latest_post": [],
     }
 
     def _decoded(kind: str, packet: bytes) -> SimpleNamespace:
@@ -61,7 +63,16 @@ def _patch_packet_decoders(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
     monkeypatch.setattr(epu, "decode_cscience_data", lambda packet: _decoded("critical", packet))
     monkeypatch.setattr(epu, "decode_ncscience_data", lambda packet: _decoded("noncritical", packet))
     monkeypatch.setattr(epu, "merge_sci_data_packet", lambda packet: packet)
-    monkeypatch.setattr(epu, "set_latest_hk", lambda packet: calls["latest_hk"].append(packet))
+    monkeypatch.setattr(
+        epu,
+        "set_latest_hk",
+        lambda packet, packet_id=None: calls["latest_hk"].append(packet) or True,
+    )
+    monkeypatch.setattr(
+        epu,
+        "set_latest_post",
+        lambda packet, packet_id=None: calls["latest_post"].append(packet) or True,
+    )
     return calls
 
 
@@ -77,6 +88,37 @@ def test_latest_hk_and_psu_caches_round_trip(monkeypatch: pytest.MonkeyPatch) ->
     assert epu.get_latest_hk() is hk
     assert epu.get_latest_psu() == psu
     assert event.set_calls == 1
+
+
+def test_latest_post_cache_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(epu, "_post_lock", threading.Lock())
+    monkeypatch.setattr(epu, "_latest_post", None)
+    monkeypatch.setattr(epu, "_latest_post_packet_id", None)
+    monkeypatch.setattr(epu, "_post_sequence", 0)
+    post = SimpleNamespace(value="post")
+
+    epu.set_latest_post(post)
+
+    assert epu.get_latest_post() is post
+    assert epu.get_post_sequence() == 1
+
+
+def test_wait_for_fresh_post_returns_new_cached_packet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(epu, "_post_lock", threading.Lock())
+    monkeypatch.setattr(epu, "_latest_post", None)
+    monkeypatch.setattr(epu, "_latest_post_packet_id", None)
+    monkeypatch.setattr(epu, "_post_sequence", 0)
+    latest = SimpleNamespace(value="post")
+
+    class _ArrivingEvent(_FakeEvent):
+        def wait(self, timeout: float) -> bool:
+            super().wait(timeout)
+            epu.set_latest_post(latest)
+            return True
+
+    monkeypatch.setattr(epu, "_post_event", _ArrivingEvent(result=True))
+
+    assert epu.wait_for_fresh_post(timeout=1.5, after_sequence=0) is latest
 
 
 def test_wait_for_fresh_hk_returns_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,6 +196,7 @@ def test_read_pkt_processes_all_packet_types_and_skips_bad_rows(
     assert post_queue.items == [post]
     assert sci_queue.items == [critical, noncritical]
     assert calls["latest_hk"] == [hk]
+    assert calls["latest_post"] == [post]
 
 
 def test_read_pkt_latest_only_prefers_latest_packet_of_each_type(
@@ -190,6 +233,53 @@ def test_read_pkt_latest_only_prefers_latest_packet_of_each_type(
     assert dump.marker == 14
     assert critical.marker == 15
     assert noncritical.marker == 16
+
+
+def test_rereading_latest_hk_does_not_publish_duplicate_or_advance_sequence(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(epu, "parse_eb_hk", lambda _packet: SimpleNamespace())
+    hk_queue = _CaptureQueue()
+    monkeypatch.setattr(epu.const, "hk_queue", hk_queue)
+    monkeypatch.setattr(epu.const, "eb_post_queue", _CaptureQueue())
+    monkeypatch.setattr(epu.const, "sci_queue", _CaptureQueue())
+    monkeypatch.setattr(epu, "_latest_hk_packet_id", None)
+    monkeypatch.setattr(epu, "_hk_sequence", 0)
+
+    path = tmp_path / "repeated-hk.log"
+    path.write_text("\n".join(["Telemetry Data:", _payload(0x1, 9)]), encoding="utf-8")
+
+    epu.read_pkt(path, latest_only=True)
+    first_sequence = epu.get_hk_sequence()
+    epu.read_pkt(path, latest_only=True)
+
+    assert first_sequence == 1
+    assert epu.get_hk_sequence() == first_sequence
+    assert len(hk_queue.items) == 1
+
+
+def test_post_packet_identity_distinguishes_new_identical_packets_from_rereads(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_packet_decoders(monkeypatch)
+    post_queue = _CaptureQueue()
+    monkeypatch.setattr(epu.const, "hk_queue", _CaptureQueue())
+    monkeypatch.setattr(epu.const, "eb_post_queue", post_queue)
+    monkeypatch.setattr(epu.const, "sci_queue", _CaptureQueue())
+
+    payload = _payload(0x3, 7)
+    path = tmp_path / "repeated-post.log"
+    path.write_text("\n".join(["Telemetry Data:", payload, "Telemetry Data:", payload]), encoding="utf-8")
+
+    epu.read_pkt(path)
+    first_post, second_post = post_queue.items
+    epu.read_pkt(path, latest_only=True)
+    reread_post = post_queue.items[2]
+
+    assert first_post.RS422_PACKET_ID != second_post.RS422_PACKET_ID
+    assert reread_post.RS422_PACKET_ID == second_post.RS422_PACKET_ID
 
 
 def test_simple_packet_decoders_wrap_unpacked_fields(monkeypatch: pytest.MonkeyPatch) -> None:

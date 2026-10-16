@@ -139,6 +139,24 @@ HEATER_INCLUSIVE_STATES: frozenset[str] = frozenset({"State2", "State3", "State4
 # State7 : All Active - OB Heating + Powered On + TEC at 0.9A + Moving
 
 MODEL_CONSUMPTION = {
+    "IFM": {
+            "State1": 87,
+            "State2": 160,
+            "State3": 179,
+            "State4": 327,
+            "State5": 266,
+            "State6": 207,
+            "State7": 380,
+            "Standby": 101,
+            "Mech": 4,
+            "Det": 12,
+            "DetHTR": 21,
+            "MechHTR": 42,
+            "Moving": 53,
+            "TEC_0_9A": 130,
+            "TEC35": 100,
+            "TEC65": 140,
+        },
     "DEM": {
         "State1": 87,
         "State2": 160,
@@ -202,6 +220,76 @@ MODEL_CONSUMPTION = {
         "State6": 185,
         "State7": 205,
         "Standby": 95,
+    },
+}
+
+# Total PSU EB input-current expectations from the current-consumption analysis
+# workbook. FM uses its PFM projection where the workbook does not list a direct
+# FM measurement. Values are in mA; the workbook specifies a +/-10 mA tolerance.
+PSU_CONSUMPTION_TOLERANCE_MA = 10.0
+PSU_CONSUMPTION_VOLTAGE_TOLERANCE_V = 0.5
+PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA = {
+    26.0: {
+        "EM": {
+            "State1": 89.0,
+            "State2": 173.0,
+            "State3": 191.0,
+            "State4": 330.0,
+            "State5": 263.0,
+            "State6": 216.0,
+            "State7": 385.0,
+        },
+        "FM": {
+            "State1": 89.28,
+            "State2": 178.82,
+            "State3": 196.92,
+            "State4": 333.84,
+            "State5": 269.94,
+            "State6": 222.98,
+            "State7": 408.11,
+        },
+    },
+    28.0: {
+        "EM": {
+            "State1": 85.0,
+            "Standby": 103.0,
+            "State2": 163.22,
+            "State3": 180.04,
+            "State4": 310.0,
+            "State5": 244.76,
+            "State6": 203.9,
+            "State7": 356.22,
+        },
+        "FM": {
+            "State1": 85.28,
+            "Standby": 109.38,
+            "State2": 169.04,
+            "State3": 185.96,
+            "State4": 313.84,
+            "State5": 251.70,
+            "State6": 210.88,
+            "State7": 379.33,
+        },
+    },
+    29.4: {
+        "EM": {
+            "State1": 83.0,
+            "State2": 157.0,
+            "State3": 173.0,
+            "State4": 296.0,
+            "State5": 237.0,
+            "State6": 194.0,
+            "State7": 344.0,
+        },
+        "FM": {
+            "State1": 83.28,
+            "State2": 162.82,
+            "State3": 178.92,
+            "State4": 299.84,
+            "State5": 243.94,
+            "State6": 200.98,
+            "State7": 367.11,
+        },
     },
 }
 

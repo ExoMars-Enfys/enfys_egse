@@ -121,12 +121,15 @@ def gate_script_control() -> None:
     ui_runtime_controller.wait_while_paused()
 
 
-def switch_psu(psu_port: Any, *, enabled: bool, psu_lock: Any = None) -> None:
-    """Switch all PSU outputs for an OB qualification stage.
+def switch_psu(
+    psu_port: Any, *, enabled: bool, psu_lock: Any = None, channel: int | None = None
+) -> None:
+    """Switch PSU outputs, optionally limiting the switch to one channel.
 
     PSU control is serially shared with the GUI monitor path. Wait (bounded) for
     the lock rather than silently skipping the switch, since a dropped switch
-    would leave the PSU in the wrong state.
+    would leave the PSU in the wrong state. When channel is omitted, switch all
+    outputs; otherwise, switch only the specified channel.
     """
     gate_script_control()
     if psu_port is None:
@@ -139,13 +142,46 @@ def switch_psu(psu_port: Any, *, enabled: bool, psu_lock: Any = None) -> None:
             acquired = False
         if not acquired:
             event_log.error("PSU switch (enabled=%s) failed: PSU lock was busy for 5s.", enabled)
-            return
+            raise TimeoutError("PSU switch failed because the PSU lock was busy for 5 seconds")
         try:
-            psu.switch_all_psu_channels(psu_port, 1 if enabled else 0)
+            if channel is None:
+                psu.switch_all_psu_channels(psu_port, 1 if enabled else 0)
+            else:
+                psu.switch_psu_channel(psu_port, channel=channel, state=enabled)
         finally:
             psu_lock.release()
         return
-    psu.switch_all_psu_channels(psu_port, 1 if enabled else 0)
+    if channel is None:
+        psu.switch_all_psu_channels(psu_port, 1 if enabled else 0)
+    else:
+        psu.switch_psu_channel(psu_port, channel=channel, state=enabled)
+
+
+def set_psu_channel_voltage(
+    psu_port: Any, *, channel: int, voltage: float, psu_lock: Any = None
+) -> None:
+    """Set one PSU channel voltage while serializing access with the monitor."""
+    gate_script_control()
+    if psu_port is None:
+        raise RuntimeError("Cannot set PSU voltage: PSU is unavailable")
+    if channel not in range(1, 5):
+        raise ValueError(f"Invalid PSU channel: {channel}")
+    if voltage < 0:
+        raise ValueError(f"Invalid PSU voltage: {voltage}")
+
+    acquired = False
+    if psu_lock is not None:
+        try:
+            acquired = psu_lock.acquire(timeout=5.0)
+        except TypeError:
+            acquired = psu_lock.acquire()
+        if not acquired:
+            raise TimeoutError("PSU voltage change failed because the PSU lock was busy for 5 seconds")
+    try:
+        psu_port.write(f"V{channel} {voltage:g}\r\n".encode("utf-8"))
+    finally:
+        if acquired:
+            psu_lock.release()
 
 
 def request_hk(port: Any, checkpoint: str, *, port_lock: Any = None, transaction_runner: Any = None) -> Any:

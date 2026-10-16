@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "OB offline replay GUI",
+			"type": "process",
+			"command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-c",
+				"import sys; sys.path.insert(0, r'${workspaceFolder}\\src'); from main import main; from nicegui import ui; main(gui_runner=lambda reload: ui.run(host='127.0.0.1', port=8086, reload=False, show=False))",
+				"--ob-replay",
+				"${workspaceFolder}\\logs\\20260929T155203"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

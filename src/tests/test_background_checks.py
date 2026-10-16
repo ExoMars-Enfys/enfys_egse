@@ -380,6 +380,61 @@ def test_read_psu_channels_skips_when_lock_is_busy():
     assert read_psu_channels(FakePort(), BusyLock()) == {}
 
 
+@pytest.mark.parametrize(("enabled", "command"), [(True, b"OP4 1\r\n"), (False, b"OP4 0\r\n")])
+def test_switch_psu_can_switch_only_one_channel(monkeypatch, enabled, command):
+    from utility_modules import background_checks
+
+    class FakePort:
+        def __init__(self):
+            self.commands = []
+
+        def write(self, command):
+            self.commands.append(command)
+
+    port = FakePort()
+    monkeypatch.setattr(background_checks, "gate_script_control", lambda: None)
+
+    background_checks.switch_psu(port, enabled=enabled, channel=4)
+
+    assert port.commands == [command]
+
+
+def test_switch_psu_defaults_to_all_outputs(monkeypatch):
+    from utility_modules import background_checks
+
+    class FakePort:
+        def __init__(self):
+            self.commands = []
+
+        def write(self, command):
+            self.commands.append(command)
+
+    port = FakePort()
+    monkeypatch.setattr(background_checks, "gate_script_control", lambda: None)
+
+    background_checks.switch_psu(port, enabled=True)
+
+    assert port.commands == [b"OPALL 1\r\n"]
+
+
+def test_set_psu_channel_voltage_uses_selected_channel(monkeypatch):
+    from utility_modules import background_checks
+
+    class FakePort:
+        def __init__(self):
+            self.commands = []
+
+        def write(self, command):
+            self.commands.append(command)
+
+    port = FakePort()
+    monkeypatch.setattr(background_checks, "gate_script_control", lambda: None)
+
+    background_checks.set_psu_channel_voltage(port, channel=4, voltage=29.4)
+
+    assert port.commands == [b"V4 29.4\r\n"]
+
+
 def test_read_psu_channels_uses_latest_cached_sample_when_queue_is_empty(monkeypatch):
     from utility_modules import eb_packet_utility
 

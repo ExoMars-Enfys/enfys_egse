@@ -43,6 +43,48 @@ info_log = logging.getLogger("info_log")
 _FORCE_PAUSE_EVENT = threading.Event()
 _FORCE_PAUSE_DIALOGS: dict[str, Any] = {}
 _PAUSE_BANNER_DIALOGS: dict[str, Any] = {}
+
+
+def _psu_channel_4_voltage(sample: dict[str, Any] | None) -> float | None:
+    """Return the measured EB PSU output voltage when it is available."""
+    if not isinstance(sample, dict):
+        return None
+    voltage = sample.get("PSU_EB_V")
+    if voltage is None:
+        voltage = sample.get("CH4_V")
+    try:
+        value = float(voltage)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _model_consumption_values(model: str) -> dict[str, float] | None:
+    """Use PFM's configured state values for the GUI's FM model selection."""
+    if model == "FM":
+        model = "PFM"
+    values = MODEL_CONSUMPTION.get(model)
+    return values if isinstance(values, dict) else None
+
+
+def _expected_consumption_ma(
+    model: str,
+    state_names: list[str],
+    model_values: dict[str, float],
+    psu_voltage_v: float | None,
+) -> float:
+    """Select workbook current expectations matching the measured PSU voltage."""
+    voltage_tables = const.PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA
+    if psu_voltage_v is not None:
+        voltage = min(voltage_tables, key=lambda setting: abs(setting - psu_voltage_v))
+        if abs(voltage - psu_voltage_v) <= const.PSU_CONSUMPTION_VOLTAGE_TOLERANCE_V:
+            model_key = "FM" if model in {"FM", "PFM"} else model
+            voltage_values = voltage_tables[voltage].get(model_key)
+            if voltage_values is not None and all(state in voltage_values for state in state_names):
+                return sum(voltage_values[state] for state in state_names)
+    return sum(model_values[state] for state in state_names)
+
+
 _OB_SCI_CAPTURE_LOCK = threading.RLock()
 _OB_SCI_CAPTURE_ID = 0
 _OB_SCI_CAPTURE_ACTIVE = False
@@ -1255,7 +1297,7 @@ def handle_script_check_failure(
     errors: list[str],
     readings: dict[str, Any] | None = None,
 ) -> bool:
-    """Ask the operator whether an OB FFT check failure should be overridden.
+    """Ask whether the operator wants to continue after a script check failure.
 
     This is the callback expected by ``scripts_modules.OB_FFT.report_check``.
     Return ``True`` to continue the script despite the failed check, or ``False``
@@ -1266,7 +1308,7 @@ def handle_script_check_failure(
     if readings:
         reading_lines = "\n".join(f"- {name}: {value}" for name, value in readings.items())
         message += f"\n\nMeasured readings:\n{reading_lines}"
-    message += "\n\nContinue the OB FFT despite this failed check?"
+    message += "\n\nContinue the script despite this failed check?"
 
     continue_run = request_confirmation(
         message,
@@ -1276,9 +1318,9 @@ def handle_script_check_failure(
         severity="negative",
     )
     if continue_run:
-        info_log.warning("Operator overrode failed OB FFT check: %s — %s", label, errors)
+        info_log.warning("Operator overrode failed script check: %s — %s", label, errors)
     else:
-        info_log.error("Operator aborted after failed OB FFT check: %s — %s", label, errors)
+        info_log.error("Operator aborted after failed script check: %s — %s", label, errors)
     return continue_run
 
 
@@ -1354,10 +1396,10 @@ def consumption_check(state_names, psu_sample: dict, errors: list[str], latest_h
     if model is None:
         errors.append("No model specified for PSU consumption check.")
         return None
-    if model not in MODEL_CONSUMPTION:
+    model_dict = _model_consumption_values(model)
+    if model_dict is None:
         errors.append(f"Unknown OB model: {model}")
         return None
-    model_dict = MODEL_CONSUMPTION[model]
     if isinstance(state_names, str):
         state_names = [state_names]
     else:
@@ -1374,12 +1416,16 @@ def consumption_check(state_names, psu_sample: dict, errors: list[str], latest_h
         errors.append("No PSU sample provided for consumption check.")
         return None
     measured_current_ma = float(psu_sample.get("PSU_EB_I") or 0.0) * 1000.0
-    base = sum(model_dict[s] for s in state_names)
-    min_i = base - 10
-    max_i = base + 10
+    psu_voltage_v = _psu_channel_4_voltage(psu_sample)
+    base = _expected_consumption_ma(model, state_names, model_dict, psu_voltage_v)
+    tolerance_ma = const.PSU_CONSUMPTION_TOLERANCE_MA
+    min_i = base - tolerance_ma
+    max_i = base + tolerance_ma
     if not (min_i <= measured_current_ma <= max_i):
         errors.append(
-            f"PSU_EB_I out of range for {state_names} ({model}): got {measured_current_ma:.2f} mA, expected {min_i}-{max_i}"
+            f"PSU_EB_I out of range for {state_names} ({model}, PSU CH4 voltage "
+            f"{psu_voltage_v if psu_voltage_v is not None else 'unknown'} V): got "
+            f"{measured_current_ma:.2f} mA, expected {min_i:.2f}-{max_i:.2f} mA"
         )
     return measured_current_ma
 
@@ -1455,6 +1501,7 @@ def resolve_consumption_bounds(
     state_names: str | list[str],
     errors: list[str],
     latest_hk: Any = None,
+    psu_voltage_v: float | None = None,
 ) -> tuple[list[str], float, float] | None:
     """Resolve expected PSU_EB_I bounds for the requested state(s)."""
     from nicegui import app as _app
@@ -1463,11 +1510,11 @@ def resolve_consumption_bounds(
     if model is None:
         errors.append("No model specified for PSU consumption check.")
         return None
-    if model not in MODEL_CONSUMPTION:
+    model_dict = _model_consumption_values(model)
+    if model_dict is None:
         errors.append(f"Unknown OB model: {model}")
         return None
 
-    model_dict = MODEL_CONSUMPTION[model]
     if isinstance(state_names, str):
         resolved_states = [state_names]
     else:
@@ -1483,9 +1530,10 @@ def resolve_consumption_bounds(
         errors.append(f"Unknown state(s) {missing} for model '{model}'")
         return None
 
-    base_current_ma = sum(model_dict[s] for s in resolved_states)
-    min_i = base_current_ma - 10
-    max_i = base_current_ma + 10
+    base_current_ma = _expected_consumption_ma(model, resolved_states, model_dict, psu_voltage_v)
+    tolerance_ma = const.PSU_CONSUMPTION_TOLERANCE_MA
+    min_i = base_current_ma - tolerance_ma
+    max_i = base_current_ma + tolerance_ma
     return resolved_states, min_i, max_i
 
 
@@ -1494,6 +1542,7 @@ def windowed_consumption_check(
     errors: list[str],
     latest_hk: Any = None,
     *,
+    check_label: str = "SCI ACQ",
     duration_s: float = _SCI_CONSUMPTION_CHECK_DURATION_S,
     per_sample_timeout_s: float = _SCI_CONSUMPTION_PER_SAMPLE_TIMEOUT_S,
     min_samples: int = _SCI_CONSUMPTION_MIN_SAMPLES,
@@ -1506,13 +1555,11 @@ def windowed_consumption_check(
     Pass/fail is decided by whether the window median lies within expected
     bounds. Returns the median measured current in mA.
     """
-    bounds = resolve_consumption_bounds(state_names, errors, latest_hk)
-    if bounds is None:
+    if resolve_consumption_bounds(state_names, errors) is None:
         return None
-    resolved_states, min_i, max_i = bounds
-
     deadline = time.monotonic() + max(float(duration_s), float(per_sample_timeout_s))
     measured_ma: list[float] = []
+    measured_voltages: list[float] = []
     moving_obs_count = 0
     moving_true_count = 0
 
@@ -1524,52 +1571,70 @@ def windowed_consumption_check(
         if not isinstance(sample, dict):
             continue
         measured_current_ma = float(sample.get("PSU_EB_I") or 0.0) * 1000.0
-        measured_ma.append(measured_current_ma)
+        measured_voltage_v = _psu_channel_4_voltage(fresh)
+        if measured_voltage_v is None:
+            measured_voltage_v = _psu_channel_4_voltage(sample)
 
         if require_motor_moving:
             hk_now = get_latest_hk() or latest_hk
             if hk_now is not None:
                 mtr = getattr(hk_now, "MTR_FLAGS", None)
-                moving = bool(getattr(mtr, "MOVING", 0))
                 moving_obs_count += 1
-                if moving:
+                if bool(getattr(mtr, "MOVING", 0)):
                     moving_true_count += 1
+                    measured_ma.append(measured_current_ma)
+                    if measured_voltage_v is not None:
+                        measured_voltages.append(measured_voltage_v)
+        else:
+            measured_ma.append(measured_current_ma)
+            if measured_voltage_v is not None:
+                measured_voltages.append(measured_voltage_v)
+
+    if require_motor_moving:
+        if moving_obs_count <= 0:
+            errors.append(
+                f"{check_label} check could not verify motor motion "
+                "(no HK MTR_FLAGS observations in window)."
+            )
+        else:
+            moving_fraction = moving_true_count / moving_obs_count
+            if moving_fraction < float(moving_fraction_required):
+                errors.append(
+                    f"{check_label} check did not run during sufficient motor motion: "
+                    f"MOVING true {moving_true_count}/{moving_obs_count} "
+                    f"({moving_fraction * 100:.1f}%), required >= {float(moving_fraction_required) * 100:.1f}%"
+                )
 
     if not measured_ma:
-        errors.append("No PSU samples captured during SCI ACQ windowed current check.")
+        errors.append(f"No PSU samples captured during {check_label} moving-current check.")
         return None
 
     sample_count = len(measured_ma)
     median_ma = statistics.median(measured_ma)
+    median_voltage_v = statistics.median(measured_voltages) if measured_voltages else None
+    bounds = resolve_consumption_bounds(state_names, errors, latest_hk, median_voltage_v)
+    if bounds is None:
+        return float(median_ma)
+    resolved_states, min_i, max_i = bounds
 
     if sample_count < int(min_samples):
         errors.append(
-            "SCI ACQ consumption check collected too few PSU samples "
+            f"{check_label} consumption check collected too few PSU samples "
             f"({sample_count} < {int(min_samples)}) over {duration_s:.1f}s."
         )
 
     if not (min_i <= median_ma <= max_i):
         errors.append(
             "PSU_EB_I median out of range for "
-            f"{resolved_states}: median={median_ma:.2f} mA, "
-            f"expected {min_i:.1f}-{max_i:.1f} mA"
+            f"{resolved_states} at PSU CH4 voltage "
+            f"{median_voltage_v if median_voltage_v is not None else 'unknown'} V: "
+            f"median={median_ma:.2f} mA, expected {min_i:.2f}-{max_i:.2f} mA"
         )
 
-    if require_motor_moving:
-        if moving_obs_count <= 0:
-            errors.append("SCI ACQ check could not verify motor motion (no HK MTR_FLAGS observations in window).")
-        else:
-            moving_fraction = moving_true_count / moving_obs_count
-            if moving_fraction < float(moving_fraction_required):
-                errors.append(
-                    "SCI ACQ check did not run during sufficient motor motion: "
-                    f"MOVING true {moving_true_count}/{moving_obs_count} "
-                    f"({moving_fraction * 100:.1f}%), required >= {float(moving_fraction_required) * 100:.1f}%"
-                )
-
     info_log.info(
-        "SCI ACQ windowed consumption stats - states=%s expected=[%.1f, %.1f] mA samples=%d "
+        "%s windowed consumption stats - states=%s expected=[%.1f, %.1f] mA samples=%d "
         "median=%.2f mA moving_obs=%d moving_true=%d",
+        check_label,
         resolved_states,
         min_i,
         max_i,
@@ -2532,23 +2597,29 @@ def is_valid_post_packet(post: Any) -> bool:
     return all(hasattr(post, field_name) for field_name in _POST_REQUIRED_FIELDS)
 
 
-def pull_post_after_ret(timeout_s: float = 6.0, poll_s: float = 0.2) -> Any | None:
-    """Return a valid POST packet after RET, retrying queue reads and RS422 refresh."""
+def pull_post_after_ret(
+    timeout_s: float = 6.0,
+    poll_s: float = 0.2,
+    after_sequence: int | None = None,
+) -> Any | None:
+    """Read cached POST telemetry without consuming the UI's packet queue."""
     deadline = time.monotonic() + max(0.1, timeout_s)
+    sequence = after_sequence
     while time.monotonic() < deadline:
-        while not const.eb_post_queue.empty():
-            post = const.eb_post_queue.get()
-            if is_valid_post_packet(post):
-                return post
+        if sequence is None:
+            cached_post = eb_packet_utility.get_latest_post()
+        else:
+            remaining = max(0.0, deadline - time.monotonic())
+            cached_post = eb_packet_utility.wait_for_fresh_post(
+                timeout=remaining,
+                after_sequence=sequence,
+            )
+            sequence = eb_packet_utility.get_post_sequence()
+        if cached_post is not None and is_valid_post_packet(cached_post):
+            return cached_post
 
-        rs422_log_path = getattr(getattr(_nicegui_app.state, "eb_interface", None), "rs422_log_path", None)
-        if rs422_log_path:
-            try:
-                eb_packet_utility.read_pkt(rs422_log_path, latest_only=True)
-            except Exception:
-                pass
-
-        time.sleep(max(0.05, poll_s))
+        if sequence is None:
+            time.sleep(max(0.05, poll_s))
 
     return None
 
@@ -2595,22 +2666,25 @@ def _record_state_check_report(
 def verify_power_state(
     state: str,
     *,
+    after_hk_sequence: int | None = None,
     readings: dict[str, Any] | None = None,
     errors_out: list[str] | None = None,
 ) -> tuple[str, bool]:
     """Verify the OB is in the expected power state.
 
-    Fetches the latest HK and PSU samples from their queues, runs a PSU
-    consumption check for *state*, then performs additional HK field checks
-    appropriate for that state:
+    Fetches the latest HK sample and checks PSU consumption for *state*, then
+    performs additional HK field checks appropriate for that state. State7
+    uses a five-second moving window and checks the median of its smoothed PSU
+    readings, requiring motor motion during at least half of the window:
 
     State2  — OB Heating:           heater verification (via consumption_check)
     State3  — OB Heating + Boards:  State2 checks + mech/det boards enabled
     State4  — OB Heating + TEC:      State3 checks + configured TEC current check
     State5  — Boards + TEC:          boards enabled + configured TEC current check
-    State7  — All Active:           State4 checks + motor moving
+    State7  — All Active:           State4 checks + windowed current + motor moving
 
     Returns (msg, passed) — the same contract as verify_safe_ret / verify_standby_ret.
+    When *after_hk_sequence* is supplied, the check waits for HK newer than that marker.
     Optional readings/errors_out containers receive the actual check measurements
     and errors for structured script pause reports.
     """
@@ -2620,17 +2694,33 @@ def verify_power_state(
     errors: list[str] = []
     ch4_current_ma: float | None = None
 
-    latest_hk = get_latest_hk()
-    fresh_psu = wait_for_fresh_psu(timeout=2.0)
-    latest_psu = get_smoothed_latest_psu(_SCRIPT_PSU_MA_WINDOW_SAMPLES) if fresh_psu is not None else None
+    latest_hk = (
+        wait_for_fresh_hk(timeout=5.0, after_sequence=after_hk_sequence)
+        if after_hk_sequence is not None
+        else get_latest_hk()
+    )
     if latest_hk is None:
-        errors.append(f"Missing HK data for {state} verification")
-    if latest_psu is None:
-        errors.append(f"Missing fresh PSU monitor data for {state} verification")
+        if after_hk_sequence is None:
+            errors.append(f"Missing HK data for {state} verification")
+        else:
+            errors.append(f"Missing fresh HK data for {state} verification")
 
     # --- PSU consumption + heater check ---
-    if latest_psu is not None:
-        ch4_current_ma = consumption_check(state, latest_psu, errors, latest_hk)
+    if state == "State7":
+        ch4_current_ma = windowed_consumption_check(
+            state,
+            errors,
+            latest_hk,
+            check_label=state,
+            require_motor_moving=True,
+        )
+    else:
+        fresh_psu = wait_for_fresh_psu(timeout=2.0)
+        latest_psu = get_smoothed_latest_psu(_SCRIPT_PSU_MA_WINDOW_SAMPLES) if fresh_psu is not None else None
+        if latest_psu is None:
+            errors.append(f"Missing fresh PSU monitor data for {state} verification")
+        else:
+            ch4_current_ma = consumption_check(state, latest_psu, errors, latest_hk)
 
     if latest_hk is not None:
         instr = getattr(latest_hk, "INSTR_STATUS_FLAGS", None)
@@ -2674,12 +2764,6 @@ def verify_power_state(
                         f"(allowed {tec_target_a - tec_tolerance_a:.2f} to {tec_target_a + tec_tolerance_a:.2f} A)"
                     )
 
-        # --- Motor moving (State7) ---
-        if state == "State7":
-            mtr = getattr(latest_hk, "MTR_FLAGS", None)
-            if not bool(getattr(mtr, "MOVING", 0)):
-                errors.append("Motor not moving (MTR_FLAGS.MOVING=0)")
-
     cos = getattr(latest_hk, "CURRENT_OPERATING_STATE", None) if latest_hk is not None else None
     _record_state_check_report(readings, errors_out, errors, latest_hk, ch4_current_ma)
 
@@ -2704,13 +2788,16 @@ def verify_power_state(
 
 
 def verify_safe_ret(
-    *, readings: dict[str, Any] | None = None, errors_out: list[str] | None = None
+    *,
+    after_post_sequence: int | None = None,
+    readings: dict[str, Any] | None = None,
+    errors_out: list[str] | None = None,
 ) -> tuple[str, bool]:
-    """Verify SAFE RET, optionally collecting readings/errors for a pause report."""
+    """Verify SAFE RET, optionally requiring POST newer than a sequence marker."""
     errors = []
     # ?RET and first check
     # This block performs the SAFE RET verification after issuing a RET and HK request.
-    latest_post = pull_post_after_ret(timeout_s=6.0)
+    latest_post = pull_post_after_ret(timeout_s=6.0, after_sequence=after_post_sequence)
     latest_psu = pull_psu_after_ret(timeout_s=6.0)
 
     if latest_post is None:
@@ -3779,7 +3866,9 @@ def create_poll_tm(
             if not all(hasattr(post, field_name) for field_name in required_post_fields):
                 logger.debug("Ignoring non-POST packet in POST queue")
             else:
-                post_identity = tuple(getattr(post, field_name, None) for field_name in required_post_fields)
+                post_identity = getattr(post, "RS422_PACKET_ID", None)
+                if post_identity is None:
+                    post_identity = tuple(getattr(post, field_name, None) for field_name in required_post_fields)
                 last_post_identity = state.setdefault("last_post_identity", {"value": None})
                 if post_identity == last_post_identity.get("value"):
                     logger.debug("Ignoring duplicate POST packet in POST queue")

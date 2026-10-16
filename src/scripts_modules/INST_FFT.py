@@ -539,7 +539,7 @@ def run_fft(verification: bool = True) -> None:
         0x1,
         0x1,
         0x00,
-        0x01,  # MT12 , spacing 250ms, duration 120s, start position 5 ()
+        0x01,  # MT1 , spacing 250ms, duration 120s, start position 5 ()
     )  #! Todo Check the measurement tables for the correct fixed point measurement
     ebtcs.set_hk_rate(interface, 0, 1)
     ui_runtime_controller.request_force_pause(

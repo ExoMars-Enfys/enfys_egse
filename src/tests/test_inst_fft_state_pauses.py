@@ -1,3 +1,4 @@
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -88,6 +89,62 @@ def test_ret_report_collects_current_and_packet_results(monkeypatch, standby, fa
     assert readings["HK check" if standby else "POST check"] is packet_result
 
 
+def test_pull_post_after_ret_does_not_consume_ui_packet_queue(monkeypatch):
+    post = SimpleNamespace(**{field: 0 for field in urc._POST_REQUIRED_FIELDS})
+    post_queue = Queue()
+    queued_post = object()
+    post_queue.put(queued_post)
+    monkeypatch.setattr(urc.const, "eb_post_queue", post_queue)
+    monkeypatch.setattr(urc.eb_packet_utility, "get_latest_post", lambda: post)
+
+    assert urc.pull_post_after_ret(timeout_s=0.1) is post
+    assert post_queue.get_nowait() is queued_post
+
+
+def test_pull_post_after_ret_can_require_fresh_packet_without_draining_ui_queue(monkeypatch):
+    post = SimpleNamespace(**{field: 0 for field in urc._POST_REQUIRED_FIELDS})
+    post_queue = Queue()
+    queued_post = object()
+    post_queue.put(queued_post)
+    wait_for_fresh_post = Mock(return_value=post)
+    monkeypatch.setattr(urc.const, "eb_post_queue", post_queue)
+    monkeypatch.setattr(urc.eb_packet_utility, "wait_for_fresh_post", wait_for_fresh_post)
+    monkeypatch.setattr(urc.eb_packet_utility, "get_post_sequence", lambda: 8)
+
+    assert urc.pull_post_after_ret(timeout_s=0.1, after_sequence=7) is post
+    wait_for_fresh_post.assert_called_once()
+    assert wait_for_fresh_post.call_args.kwargs["after_sequence"] == 7
+    assert 0 < wait_for_fresh_post.call_args.kwargs["timeout"] <= 0.101
+    assert post_queue.get_nowait() is queued_post
+
+
+def test_power_state_can_require_fresh_hk_without_consuming_gui_queue(monkeypatch):
+    hk = SimpleNamespace(
+        CURRENT_OPERATING_STATE=5,
+        INSTR_STATUS_FLAGS=SimpleNamespace(OB_MECHANISM_BOARD_ENABLED=1, OB_DETECTOR_BOARD_ENABLED=1),
+    )
+    psu = {"PSU_EB_I": 0.123}
+    fresh_hk = Mock(return_value=hk)
+    monkeypatch.setattr(urc, "wait_for_fresh_hk", fresh_hk)
+    monkeypatch.setattr(urc, "wait_for_fresh_psu", lambda **_kwargs: psu)
+    monkeypatch.setattr(urc, "get_smoothed_latest_psu", lambda _count: psu)
+    monkeypatch.setattr(urc, "consumption_check", lambda *_args: 123.0)
+    monkeypatch.setattr(urc, "notify", Mock())
+    readings, errors = {}, []
+
+    _, passed = urc.verify_power_state(
+        "State3",
+        after_hk_sequence=6,
+        readings=readings,
+        errors_out=errors,
+    )
+
+    assert passed
+    assert errors == []
+    fresh_hk.assert_called_once_with(timeout=5.0, after_sequence=6)
+    assert readings["CURRENT_OPERATING_STATE"] == 5
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_power_state_report_uses_the_verified_samples(monkeypatch, failed):
     hk = SimpleNamespace(CURRENT_OPERATING_STATE=5, EB_TEC_DRIVE_CURRENT=10000)
@@ -115,6 +172,89 @@ def test_power_state_report_uses_the_verified_samples(monkeypatch, failed):
     assert readings["PSU_EB_I (mA)"] == 123.0
     assert readings["CURRENT_OPERATING_STATE"] == 5
     assert readings["TEC current (A)"] == pytest.approx(0.162)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_state7_uses_windowed_psu_check_and_motion_samples(monkeypatch, failed):
+    hk = SimpleNamespace(
+        CURRENT_OPERATING_STATE=5,
+        EB_TEC_DRIVE_CURRENT=round(config.TEC_EXPECTED_CURRENT_A / 0.0000162),
+        INSTR_STATUS_FLAGS=SimpleNamespace(
+            OB_MECHANISM_BOARD_ENABLED=1,
+            OB_DETECTOR_BOARD_ENABLED=1,
+        ),
+    )
+    monkeypatch.setattr(urc, "get_latest_hk", lambda: hk)
+    monkeypatch.setattr(urc, "notify", Mock())
+    monkeypatch.setattr(
+        urc,
+        "wait_for_fresh_psu",
+        lambda **kwargs: pytest.fail("State7 should use the windowed PSU check"),
+    )
+    monkeypatch.setattr(
+        urc,
+        "consumption_check",
+        lambda *_args, **_kwargs: pytest.fail("State7 should use the windowed PSU check"),
+    )
+    windowed_check = Mock(return_value=321.0)
+    if failed:
+        def fail_window(_state, window_errors, _hk, **_kwargs):
+            window_errors.append("Window current out of range")
+            return 321.0
+
+        windowed_check.side_effect = fail_window
+    monkeypatch.setattr(urc, "windowed_consumption_check", windowed_check)
+
+    readings, errors = {}, []
+    _, passed = urc.verify_power_state("State7", readings=readings, errors_out=errors)
+
+    assert passed is not failed
+    assert errors == (["Window current out of range"] if failed else [])
+    assert readings["PSU_EB_I (mA)"] == 321.0
+    windowed_check.assert_called_once_with(
+        "State7",
+        errors,
+        hk,
+        check_label="State7",
+        require_motor_moving=True,
+    )
+
+
+def test_state7_window_uses_median_of_moving_psu_samples(monkeypatch):
+    hk_packets = iter(
+        (
+            SimpleNamespace(MTR_FLAGS=SimpleNamespace(MOVING=0)),
+            SimpleNamespace(MTR_FLAGS=SimpleNamespace(MOVING=1)),
+            SimpleNamespace(MTR_FLAGS=SimpleNamespace(MOVING=1)),
+        )
+    )
+    psu_samples = iter(
+        (
+            {"PSU_EB_I": 0.400},
+            {"PSU_EB_I": 0.300},
+            {"PSU_EB_I": 0.310},
+        )
+    )
+    timestamps = iter((0.0, 0.1, 0.2, 0.3, 2.0))
+    monkeypatch.setattr(urc, "resolve_consumption_bounds", lambda *_args: (["State7"], 300.0, 306.0))
+    monkeypatch.setattr(urc, "time", SimpleNamespace(monotonic=lambda: next(timestamps)))
+    monkeypatch.setattr(urc, "wait_for_fresh_psu", lambda **_kwargs: object())
+    monkeypatch.setattr(urc, "get_smoothed_latest_psu", lambda _count: next(psu_samples))
+    monkeypatch.setattr(urc, "get_latest_hk", lambda: next(hk_packets))
+
+    errors = []
+    median = urc.windowed_consumption_check(
+        "State7",
+        errors,
+        duration_s=1.0,
+        per_sample_timeout_s=0.1,
+        min_samples=2,
+        require_motor_moving=True,
+        check_label="State7",
+    )
+
+    assert median == pytest.approx(305.0)
+    assert errors == []
 
 
 @pytest.mark.parametrize("verification", [False, True])

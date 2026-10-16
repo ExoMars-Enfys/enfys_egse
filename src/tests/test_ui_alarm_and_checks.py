@@ -70,6 +70,79 @@ def test_acquisition_report_preserves_state6_failure(monkeypatch) -> None:
     assert readings["State 6 power check"] == "Performed"
 
 
+@pytest.mark.parametrize(
+    ("model", "voltage", "state", "expected_ma"),
+    [
+        ("EM", 26.0, "State1", 89.0),
+        ("FM", 26.0, "State7", 408.11),
+        ("EM", 28.0, "State4", 310.0),
+        ("FM", 28.0, "Standby", 109.38),
+        ("EM", 29.4, "State3", 173.0),
+        ("FM", 29.4, "State6", 200.98),
+    ],
+)
+def test_voltage_specific_consumption_bounds_use_workbook_values(
+    monkeypatch, model, voltage, state, expected_ma
+):
+    monkeypatch.setattr(urc._nicegui_app.state, "current_model", model, raising=False)
+    errors = []
+
+    bounds = urc.resolve_consumption_bounds(state, errors, psu_voltage_v=voltage)
+
+    assert bounds is not None
+    assert bounds[0] == [state]
+    assert bounds[1:] == pytest.approx((expected_ma - 10, expected_ma + 10))
+    assert errors == []
+
+
+def test_voltage_specific_consumption_check_uses_measured_psu_output(monkeypatch):
+    monkeypatch.setattr(urc._nicegui_app.state, "current_model", "FM", raising=False)
+    errors = []
+
+    measured = urc.consumption_check(
+        "State1",
+        {"PSU_EB_V": 26.0, "PSU_EB_I": 0.098},
+        errors,
+    )
+
+    assert measured == pytest.approx(98.0)
+    assert errors == []
+
+
+def test_unknown_or_off_voltage_uses_existing_model_consumption(monkeypatch):
+    monkeypatch.setattr(urc._nicegui_app.state, "current_model", "EM", raising=False)
+    errors = []
+
+    bounds = urc.resolve_consumption_bounds("Standby", errors, psu_voltage_v=-0.01)
+
+    assert bounds == (["Standby"], 93.0, 113.0)
+    assert errors == []
+
+
+def test_windowed_consumption_uses_voltage_from_captured_samples(monkeypatch):
+    monkeypatch.setattr(urc._nicegui_app.state, "current_model", "FM", raising=False)
+    monkeypatch.setattr(urc, "wait_for_fresh_psu", lambda **_kwargs: {"PSU_EB_V": 26.0})
+    monkeypatch.setattr(
+        urc,
+        "get_smoothed_latest_psu",
+        lambda _window: {"PSU_EB_V": 26.0, "PSU_EB_I": 0.098},
+    )
+    monotonic_values = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(urc.time, "monotonic", lambda: next(monotonic_values))
+    errors = []
+
+    measured = urc.windowed_consumption_check(
+        "State1",
+        errors,
+        duration_s=1.0,
+        per_sample_timeout_s=0.01,
+        min_samples=1,
+    )
+
+    assert measured == pytest.approx(98.0)
+    assert errors == []
+
+
 def test_plot_samples_retain_real_and_adu_values_for_each_timestamp() -> None:
     class _PlotCard:
         def __init__(self) -> None:

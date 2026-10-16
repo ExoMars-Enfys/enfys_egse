@@ -593,9 +593,9 @@ def _open_scope_settings_dialog() -> None:
         ui.separator()
         resource_input = ui.input("VISA Resource", value=getattr(config, "SCOPE_VISA_RESOURCE", "")).classes("w-full")
         setup_file_input = ui.input(
-            "Scope Setup File",
+            "Scope Setup File (optional)",
             value=getattr(app.state, "scope_setup_file", ""),
-            placeholder="C:/Users/Public/TEC_CURRENT.set",
+            placeholder="Only required for TEC_test; In-rush uses its bundled setup",
         ).classes("w-full")
         status_label = ui.label("").classes("text-sm")
 
@@ -649,12 +649,12 @@ def _open_scope_settings_dialog() -> None:
             if not resource:
                 ui.notify("Enter a VISA resource string first", color="warning")
                 return
-            if not setup_file:
-                ui.notify("Enter the setup file path stored on the scope", color="warning")
-                return
             config.SCOPE_VISA_RESOURCE = resource
-            app.state.scope_setup_file = setup_file
-            ui.notify("Scope connection and setup file selected", type="positive")
+            if setup_file:
+                app.state.scope_setup_file = setup_file
+            else:
+                app.state.scope_setup_file = ""
+            ui.notify("Scope connection selected", type="positive")
             dialog.close()
 
         with ui.row().classes("w-full gap-2"):
@@ -725,7 +725,6 @@ async def _run_selected_script(state: dict[str, Any], script_key: str, buttons_r
     if key == "tec_test" and not str(getattr(app.state, "scope_setup_file", "")).strip():
         ui.notify("Select a scope setup file in Scope Settings before running TEC_test", color="warning")
         return
-
     script_control = ui_runtime_controller.get_script_control()
     if bool(script_control.get("running")):
         if ui_runtime_controller.is_aborted():
@@ -770,6 +769,12 @@ async def _run_selected_script(state: dict[str, Any], script_key: str, buttons_r
 
             if key == "tec_test":
                 script_runner(scope_setup_file=str(app.state.scope_setup_file))
+            elif key == "in_rush":
+                script_runner(
+                    scope_setup_file=None,
+                    psu_port=state.get("psu_port"),
+                    psu_lock=state.get("psu_lock"),
+                )
             else:
                 _invoke_script_entry_point(script_runner, state)
 
