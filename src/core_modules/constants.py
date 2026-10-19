@@ -10,7 +10,7 @@ from core_modules import config
 DEBUG_LEVEL = logging.INFO
 DEFAULT_PREFIX = datetime.now().strftime("%Y%m%dT%H%M%S")
 DEFAULT_PATH = Path.cwd() / "logs" / DEFAULT_PREFIX
-DEFAULT_EB_PATH = r"C:\wdir\EB_EGSE"
+DEFAULT_EB_PATH = r"C:\wdir\EB\EB_EGSE"
 DEFAULT_STARTUP_MODE = "OB"
 
 SCI_RESP_MARGIN = 0.020  # seconds
@@ -176,14 +176,14 @@ MODEL_CONSUMPTION = {
         "TEC65": 140,
     },
     "EM": {  # Consumption Dictionary for EMC
-        "State1": 84,  # 90 - EMC | 84 - FFT |
-        "State2": 163,  # 170 - EMC | 163 - FFT |
-        "State3": 180,  # 190 - EMC | 180 - FFT |
-        "State4": 310,  # 320 - EMC | 310 - FFT |
-        "State5": 240,  # 255 - EMC | 240 - FFT |
+        "State1": 90,  # 90 - EMC | 84 - FFT |
+        "State2": 170,  # 170 - EMC | 163 - FFT |
+        "State3": 190,  # 190 - EMC | 180 - FFT |
+        "State4": 320,  # 320 - EMC | 310 - FFT |
+        "State5": 255,  # 255 - EMC | 240 - FFT |
         "State6": 200,  # pretty much same (200)
-        "State7": 360,  # 370 - EMC | 360 - FFT |
-        "Standby": 103,  # 110 - EMC | 103 - FFT |
+        "State7": 370,  # 370 - EMC | 360 - FFT |
+        "Standby": 110,  # 110 - EMC | 103 - FFT |
         "Mech": 4,
         "Det": 10,
         "DetHTR": 19,
@@ -225,7 +225,8 @@ MODEL_CONSUMPTION = {
 
 # Total PSU EB input-current expectations from the current-consumption analysis
 # workbook. FM uses its PFM projection where the workbook does not list a direct
-# FM measurement. Values are in mA; the workbook specifies a +/-10 mA tolerance.
+# FM measurement. At 28 V, FM values include the state-specific EMC-over-FFT
+# offsets for inrush testing. Values are in mA; the workbook specifies a +/-10 mA tolerance.
 PSU_CONSUMPTION_TOLERANCE_MA = 10.0
 PSU_CONSUMPTION_VOLTAGE_TOLERANCE_V = 0.5
 PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA = {
@@ -262,14 +263,14 @@ PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA = {
             "State7": 356.22,
         },
         "FM": {
-            "State1": 89,
-            "Standby": 110,
-            "State2": 170,
-            "State3": 185,
-            "State4": 315,
-            "State5": 250,
+            "State1": 95,
+            "Standby": 117,
+            "State2": 177,
+            "State3": 195,
+            "State4": 325,
+            "State5": 265,
             "State6": 210,
-            "State7": 375,
+            "State7": 385,
         },
     },
     29.4: {
