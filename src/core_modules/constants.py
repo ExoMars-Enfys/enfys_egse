@@ -194,14 +194,14 @@ MODEL_CONSUMPTION = {
         "TEC65": 140,  #! need to probably check and update
     },
     "PFM": {
-        "State1": 84,  # 90 - EMC | 84 - FFT
-        "State2": 163,  # 170 - EMC | 163 - FFT
-        "State3": 180,  # 190 - EMC | 180 - FFT
-        "State4": 310,  # 320 - EMC | 310 - FFT
-        "State5": 230,  # 255 - EMC | 230 - FFT
-        "State6": 200,  # pretty much same
-        "State7": 360,  # 370 - EMC | 360 - FFT
-        "Standby": 103,  # 110 - EMC | 103 - FFT
+        "State1": 95,   # 95 - EMC | 84 - FFT
+        "Standby": 117, # 117 - EMC | 103 - FFT
+        "State2": 177,  # 175 - EMC | 163 - FFT
+        "State3": 195,  # 190 - EMC | 180 - FFT
+        "State4": 325,  # 325 - EMC | 310 - FFT
+        "State5": 265,  # 255 - EMC | 230 - FFT
+        "State6": 210,  #Pretty much same
+        "State7": 385,  # 380 - EMC | 360 - FFT
         "Mech": 4,
         "Det": 10,
         "DetHTR": 19,
@@ -253,7 +253,7 @@ PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA = {
     },
     28.0: {
         "EM": {
-            "State1": 85.0,
+            "State1": 85.0, #EMC
             "Standby": 103.0,
             "State2": 163.22,
             "State3": 180.04,
@@ -268,7 +268,7 @@ PSU_MODEL_CONSUMPTION_BY_VOLTAGE_MA = {
             "State2": 177,
             "State3": 195,
             "State4": 325,
-            "State5": 265,
+            "State5": 255,
             "State6": 210,
             "State7": 385,
         },
